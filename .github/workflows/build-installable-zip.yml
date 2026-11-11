@@ -3,10 +3,12 @@ name: Build installable plugin ZIPs (Free + Pro)
 # Free and Pro live in separate repositories:
 #   Free: Vertex-Systems-Network/shipping-cost-monitor-for-woocommerce
 #   Pro:  Vertex-Systems-Network/shipping-cost-monitor-pro-for-woocommerce
-# This workflow is identical in both. It checks out this repository and the other one
-# (same branch name if it exists there, otherwise main), checks the Free/Pro contract,
-# and always builds BOTH installable ZIPs, so a change in either plugin is tested
-# against the other.
+# This workflow is the same in both (only the push `paths:` list differs). A first job
+# pins one commit of each repository (the other repository's same-named branch if it
+# exists, else main); every later job checks out exactly those commits, Free into free/
+# and Pro into pro/. It checks the Free/Pro contract,
+# lints both on every supported PHP version and, only when all of that passes, builds
+# and uploads BOTH installable ZIPs.
 
 on:
   workflow_dispatch:
@@ -32,8 +34,37 @@ env:
   PRO_REPO: Vertex-Systems-Network/shipping-cost-monitor-pro-for-woocommerce
 
 jobs:
-  build:
-    name: Contract check, PHP ${{ matrix.php }} lint and packaging
+  resolve:
+    name: Resolve the Free and Pro commits to build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      free_sha: ${{ steps.refs.outputs.free_sha }}
+      pro_sha: ${{ steps.refs.outputs.pro_sha }}
+      self_path: ${{ steps.refs.outputs.self_path }}
+    steps:
+      - name: Pin both repositories to one commit each
+        id: refs
+        shell: bash
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+          SELF_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          # Resolved once here; every later job checks out exactly these commits, so the
+          # ZIPs always contain the code that passed the checks.
+          if [ "$GITHUB_REPOSITORY" = "$FREE_REPO" ]; then other="$PRO_REPO"; self_path=free; else other="$FREE_REPO"; self_path=pro; fi
+          # The other repository's same-named branch if exactly refs/heads/$BRANCH exists, else main.
+          line="$(git ls-remote "https://github.com/${other}.git" "refs/heads/${BRANCH}" | awk -v r="refs/heads/${BRANCH}" '$2==r')"
+          if [ -n "$line" ]; then other_ref="$BRANCH"; other_sha="${line%%[[:space:]]*}"; else other_ref=main; other_sha="$(git ls-remote "https://github.com/${other}.git" refs/heads/main | cut -f1)"; fi
+          [ -n "$other_sha" ] || { echo "::error::Could not resolve ${other}@${other_ref}"; exit 1; }
+          if [ "$self_path" = free ]; then free_sha="$SELF_SHA"; pro_sha="$other_sha"; else pro_sha="$SELF_SHA"; free_sha="$other_sha"; fi
+          { echo "free_sha=$free_sha"; echo "pro_sha=$pro_sha"; echo "self_path=$self_path"; } >> "$GITHUB_OUTPUT"
+          echo "Free ${free_sha} | Pro ${pro_sha} (other repository: ${other}@${other_ref})"
+
+  check:
+    name: Contract check and PHP ${{ matrix.php }} lint
+    needs: resolve
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -41,31 +72,20 @@ jobs:
       matrix:
         php: ['8.1', '8.2', '8.3', '8.4']
     steps:
-      - name: Pick the other repository's branch
-        id: refs
-        shell: bash
-        env:
-          BRANCH: ${{ github.head_ref || github.ref_name }}
-        run: |
-          set -euo pipefail
-          if [ "$GITHUB_REPOSITORY" = "$FREE_REPO" ]; then other="$PRO_REPO"; else other="$FREE_REPO"; fi
-          if git ls-remote --exit-code --heads "https://github.com/${other}.git" "$BRANCH" >/dev/null 2>&1; then ref="$BRANCH"; else ref=main; fi
-          echo "other=$other" >> "$GITHUB_OUTPUT"
-          echo "other_ref=$ref" >> "$GITHUB_OUTPUT"
-          echo "Building with ${other}@${ref}"
-
-      - name: Check out this repository
+      - name: Check out Free (pinned commit)
         uses: actions/checkout@v7.0.0
         with:
-          path: pro
+          repository: ${{ env.FREE_REPO }}
+          ref: ${{ needs.resolve.outputs.free_sha }}
+          path: free
           persist-credentials: false
 
-      - name: Check out the other repository
+      - name: Check out Pro (pinned commit)
         uses: actions/checkout@v7.0.0
         with:
-          repository: ${{ steps.refs.outputs.other }}
-          ref: ${{ steps.refs.outputs.other_ref }}
-          path: free
+          repository: ${{ env.PRO_REPO }}
+          ref: ${{ needs.resolve.outputs.pro_sha }}
+          path: pro
           persist-credentials: false
 
       - name: Set up PHP and Composer
@@ -75,13 +95,13 @@ jobs:
           tools: composer:v2
           coverage: none
 
-      - name: Free/Pro contract (hooks, constants, script handle, JS globals, Requires Plugins)
-        run: bash pro/.github/scripts/check-contract.sh free pro
-
       - name: Install Composer autoloaders
         run: |
           composer install --working-dir=free --no-dev --prefer-dist --no-interaction --no-progress --classmap-authoritative
           composer install --working-dir=pro --no-dev --prefer-dist --no-interaction --no-progress --classmap-authoritative
+
+      - name: Free/Pro contract (hooks, constants, script handle, JS globals, Requires Plugins)
+        run: bash "${{ needs.resolve.outputs.self_path }}/.github/scripts/check-contract.sh" free pro
 
       - name: Lint PHP
         shell: bash
@@ -93,6 +113,40 @@ jobs:
         run: |
           php -r 'define("ABSPATH", __DIR__ . "/"); require "free/vendor/autoload.php"; require "pro/vendor/autoload.php"; foreach (array("WPEssential\\ShippingCostMonitor\\Plugin", "WPEssential\\ShippingCostMonitorPro\\Plugin", "WPEssential\\ShippingCostMonitorPro\\Admin\\InvoiceImporter") as $c) { if (!class_exists($c)) { fwrite(STDERR, "PSR-4 autoload smoke failed: $c\n"); exit(1); } } echo "PSR-4 autoload smoke passed\n";' | tee /tmp/smoke.txt
           grep -q "PSR-4 autoload smoke passed" /tmp/smoke.txt
+
+  build:
+    name: Build and upload Free and Pro ZIPs
+    needs: [resolve, check]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out Free (pinned commit)
+        uses: actions/checkout@v7.0.0
+        with:
+          repository: ${{ env.FREE_REPO }}
+          ref: ${{ needs.resolve.outputs.free_sha }}
+          path: free
+          persist-credentials: false
+
+      - name: Check out Pro (pinned commit)
+        uses: actions/checkout@v7.0.0
+        with:
+          repository: ${{ env.PRO_REPO }}
+          ref: ${{ needs.resolve.outputs.pro_sha }}
+          path: pro
+          persist-credentials: false
+
+      - name: Set up PHP and Composer
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          tools: composer:v2
+          coverage: none
+
+      - name: Install Composer autoloaders
+        run: |
+          composer install --working-dir=free --no-dev --prefer-dist --no-interaction --no-progress --classmap-authoritative
+          composer install --working-dir=pro --no-dev --prefer-dist --no-interaction --no-progress --classmap-authoritative
 
       - name: Check versions match
         shell: bash
@@ -121,21 +175,25 @@ jobs:
           fi
 
       - name: Package both plugins
-        if: matrix.php == '8.3'
         id: package
         shell: bash
         run: |
           set -euo pipefail
-          pack() { # slug source-dir out-dir files...
+          # pack SLUG SRC OUT REQUIRED... -- OPTIONAL...
+          pack() {
             local slug="$1" src="$2" out="$3"; shift 3
-            local dir="$out/$slug"
+            local dir="$out/$slug" optional=0 f
             rm -rf "$out"; mkdir -p "$dir"
-            for f in "$@"; do [ -e "$src/$f" ] && cp -R "$src/$f" "$dir/"; done
+            for f in "$@"; do
+              if [ "$f" = "--" ]; then optional=1; continue; fi
+              if [ -e "$src/$f" ]; then cp -R "$src/$f" "$dir/"
+              elif [ "$optional" = 0 ]; then echo "::error::Required file $src/$f is missing"; return 1; fi
+            done
             git -C "$src" rev-parse HEAD > "$dir/BUILD-ID.txt"
             (cd "$dir" && find . -type f ! -name SHA256SUMS | LC_ALL=C sort | xargs sha256sum > SHA256SUMS)
             (cd "$out" && zip -qr "../$slug.zip" "$slug") && unzip -tq "$slug.zip"
           }
-          pack shipping-cost-monitor-for-woocommerce free build-free assets includes vendor languages shipping-cost-monitor-for-woocommerce.php uninstall.php readme.txt changelog.txt LICENSE composer.json
+          pack shipping-cost-monitor-for-woocommerce free build-free assets includes vendor shipping-cost-monitor-for-woocommerce.php uninstall.php readme.txt changelog.txt LICENSE composer.json -- languages
           pack shipping-cost-monitor-pro-for-woocommerce pro build-pro assets includes vendor shipping-cost-monitor-pro-for-woocommerce.php uninstall.php changelog.txt LICENSE composer.json
           free_sha="$(git -C free rev-parse --short=12 HEAD)"; pro_sha="$(git -C pro rev-parse --short=12 HEAD)"
           echo "free_name=shipping-cost-monitor-for-woocommerce-${free_sha}" >> "$GITHUB_OUTPUT"
@@ -150,7 +208,6 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload Free ZIP
-        if: matrix.php == '8.3'
         uses: actions/upload-artifact@v7.0.1
         with:
           # GitHub wraps every artifact in a ZIP. Uploading the folder that holds the plugin
@@ -161,7 +218,6 @@ jobs:
           retention-days: 14
 
       - name: Upload Pro ZIP
-        if: matrix.php == '8.3'
         uses: actions/upload-artifact@v7.0.1
         with:
           name: ${{ steps.package.outputs.pro_name }}
