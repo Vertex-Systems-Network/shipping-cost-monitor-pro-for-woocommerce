@@ -3,9 +3,10 @@ name: Build installable plugin ZIPs (Free + Pro)
 # Free and Pro live in separate repositories:
 #   Free: Vertex-Systems-Network/shipping-cost-monitor-for-woocommerce
 #   Pro:  Vertex-Systems-Network/shipping-cost-monitor-pro-for-woocommerce
-# This workflow is the same in both (only the push `paths:` list differs). It checks out
-# both repositories, Free into free/ and Pro into pro/, using the other repository's
-# same-named branch if it exists and main otherwise. It checks the Free/Pro contract,
+# This workflow is the same in both (only the push `paths:` list differs). A first job
+# pins one commit of each repository (the other repository's same-named branch if it
+# exists, else main); every later job checks out exactly those commits, Free into free/
+# and Pro into pro/. It checks the Free/Pro contract,
 # lints both on every supported PHP version and, only when all of that passes, builds
 # and uploads BOTH installable ZIPs.
 
@@ -33,8 +34,37 @@ env:
   PRO_REPO: Vertex-Systems-Network/shipping-cost-monitor-pro-for-woocommerce
 
 jobs:
+  resolve:
+    name: Resolve the Free and Pro commits to build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      free_sha: ${{ steps.refs.outputs.free_sha }}
+      pro_sha: ${{ steps.refs.outputs.pro_sha }}
+      self_path: ${{ steps.refs.outputs.self_path }}
+    steps:
+      - name: Pin both repositories to one commit each
+        id: refs
+        shell: bash
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+          SELF_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          # Resolved once here; every later job checks out exactly these commits, so the
+          # ZIPs always contain the code that passed the checks.
+          if [ "$GITHUB_REPOSITORY" = "$FREE_REPO" ]; then other="$PRO_REPO"; self_path=free; else other="$FREE_REPO"; self_path=pro; fi
+          # The other repository's same-named branch if exactly refs/heads/$BRANCH exists, else main.
+          line="$(git ls-remote "https://github.com/${other}.git" "refs/heads/${BRANCH}" | awk -v r="refs/heads/${BRANCH}" '$2==r')"
+          if [ -n "$line" ]; then other_ref="$BRANCH"; other_sha="${line%%[[:space:]]*}"; else other_ref=main; other_sha="$(git ls-remote "https://github.com/${other}.git" refs/heads/main | cut -f1)"; fi
+          [ -n "$other_sha" ] || { echo "::error::Could not resolve ${other}@${other_ref}"; exit 1; }
+          if [ "$self_path" = free ]; then free_sha="$SELF_SHA"; pro_sha="$other_sha"; else pro_sha="$SELF_SHA"; free_sha="$other_sha"; fi
+          { echo "free_sha=$free_sha"; echo "pro_sha=$pro_sha"; echo "self_path=$self_path"; } >> "$GITHUB_OUTPUT"
+          echo "Free ${free_sha} | Pro ${pro_sha} (other repository: ${other}@${other_ref})"
+
   check:
     name: Contract check and PHP ${{ matrix.php }} lint
+    needs: resolve
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -42,38 +72,20 @@ jobs:
       matrix:
         php: ['8.1', '8.2', '8.3', '8.4']
     steps:
-      - name: Resolve repositories and branches
-        id: refs
-        shell: bash
-        env:
-          BRANCH: ${{ github.head_ref || github.ref_name }}
-        run: |
-          set -euo pipefail
-          # Free always lands in free/ and Pro in pro/, whichever repository started the run.
-          if [ "$GITHUB_REPOSITORY" = "$FREE_REPO" ]; then
-            other="$PRO_REPO"; self_path=free; other_path=pro
-          else
-            other="$FREE_REPO"; self_path=pro; other_path=free
-          fi
-          # Use the other repository's branch only if exactly refs/heads/$BRANCH exists there.
-          if git ls-remote "https://github.com/${other}.git" "refs/heads/${BRANCH}" | grep -q "refs/heads/${BRANCH}$"; then ref="$BRANCH"; else ref=main; fi
-          {
-            echo "other=$other"; echo "other_ref=$ref"; echo "self_path=$self_path"; echo "other_path=$other_path"
-          } >> "$GITHUB_OUTPUT"
-          echo "This repository -> ${self_path}/; ${other}@${ref} -> ${other_path}/"
-
-      - name: Check out this repository
+      - name: Check out Free (pinned commit)
         uses: actions/checkout@v7.0.0
         with:
-          path: ${{ steps.refs.outputs.self_path }}
+          repository: ${{ env.FREE_REPO }}
+          ref: ${{ needs.resolve.outputs.free_sha }}
+          path: free
           persist-credentials: false
 
-      - name: Check out the other repository
+      - name: Check out Pro (pinned commit)
         uses: actions/checkout@v7.0.0
         with:
-          repository: ${{ steps.refs.outputs.other }}
-          ref: ${{ steps.refs.outputs.other_ref }}
-          path: ${{ steps.refs.outputs.other_path }}
+          repository: ${{ env.PRO_REPO }}
+          ref: ${{ needs.resolve.outputs.pro_sha }}
+          path: pro
           persist-credentials: false
 
       - name: Set up PHP and Composer
@@ -89,7 +101,7 @@ jobs:
           composer install --working-dir=pro --no-dev --prefer-dist --no-interaction --no-progress --classmap-authoritative
 
       - name: Free/Pro contract (hooks, constants, script handle, JS globals, Requires Plugins)
-        run: bash "${{ steps.refs.outputs.self_path }}/.github/scripts/check-contract.sh" free pro
+        run: bash "${{ needs.resolve.outputs.self_path }}/.github/scripts/check-contract.sh" free pro
 
       - name: Lint PHP
         shell: bash
@@ -104,42 +116,24 @@ jobs:
 
   build:
     name: Build and upload Free and Pro ZIPs
-    needs: check
+    needs: [resolve, check]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Resolve repositories and branches
-        id: refs
-        shell: bash
-        env:
-          BRANCH: ${{ github.head_ref || github.ref_name }}
-        run: |
-          set -euo pipefail
-          # Free always lands in free/ and Pro in pro/, whichever repository started the run.
-          if [ "$GITHUB_REPOSITORY" = "$FREE_REPO" ]; then
-            other="$PRO_REPO"; self_path=free; other_path=pro
-          else
-            other="$FREE_REPO"; self_path=pro; other_path=free
-          fi
-          # Use the other repository's branch only if exactly refs/heads/$BRANCH exists there.
-          if git ls-remote "https://github.com/${other}.git" "refs/heads/${BRANCH}" | grep -q "refs/heads/${BRANCH}$"; then ref="$BRANCH"; else ref=main; fi
-          {
-            echo "other=$other"; echo "other_ref=$ref"; echo "self_path=$self_path"; echo "other_path=$other_path"
-          } >> "$GITHUB_OUTPUT"
-          echo "This repository -> ${self_path}/; ${other}@${ref} -> ${other_path}/"
-
-      - name: Check out this repository
+      - name: Check out Free (pinned commit)
         uses: actions/checkout@v7.0.0
         with:
-          path: ${{ steps.refs.outputs.self_path }}
+          repository: ${{ env.FREE_REPO }}
+          ref: ${{ needs.resolve.outputs.free_sha }}
+          path: free
           persist-credentials: false
 
-      - name: Check out the other repository
+      - name: Check out Pro (pinned commit)
         uses: actions/checkout@v7.0.0
         with:
-          repository: ${{ steps.refs.outputs.other }}
-          ref: ${{ steps.refs.outputs.other_ref }}
-          path: ${{ steps.refs.outputs.other_path }}
+          repository: ${{ env.PRO_REPO }}
+          ref: ${{ needs.resolve.outputs.pro_sha }}
+          path: pro
           persist-credentials: false
 
       - name: Set up PHP and Composer
