@@ -1,7 +1,7 @@
 <?php
 /**
  * Plugin Name: Shipping Cost Monitor Pro for WooCommerce
- * Plugin URI: https://wpessential.org
+ * Plugin URI: https://wpessential.org/plugins/shipping-cost-monitor-pro-for-woocommerce
  * Description: Adds courier invoice CSV import with exact order matching and read-only ShipStation label costs to Shipping Cost Monitor for WooCommerce.
  * Version: 1.0.0
  * Requires at least: 7.0
