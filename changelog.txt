@@ -1,0 +1,8 @@
+*** Shipping Cost Monitor Pro for WooCommerce Changelog ***
+
+2026-11-11 - version 1.0.0
+* Add - Courier invoice CSV preview in the browser, column mapping and saved mapping profiles.
+* Add - Exact order ID / order number matching with duplicate, ambiguous, currency and refund review states.
+* Add - Reviewed, idempotent saving of matched costs; existing costs are never overwritten.
+* Add - Read-only ShipStation V2 label costs (booked-label evidence) with encrypted API key storage.
+* Add - Requires Shipping Cost Monitor for WooCommerce 1.0.0 or later.

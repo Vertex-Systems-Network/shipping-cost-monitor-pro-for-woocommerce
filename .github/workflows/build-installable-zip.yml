@@ -1,0 +1,170 @@
+name: Build installable plugin ZIPs (Free + Pro)
+
+# Free and Pro live in separate repositories:
+#   Free: Vertex-Systems-Network/shipping-cost-monitor-for-woocommerce
+#   Pro:  Vertex-Systems-Network/shipping-cost-monitor-pro-for-woocommerce
+# This workflow is identical in both. It checks out this repository and the other one
+# (same branch name if it exists there, otherwise main), checks the Free/Pro contract,
+# and always builds BOTH installable ZIPs, so a change in either plugin is tested
+# against the other.
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/**'
+      - 'assets/**'
+      - 'includes/**'
+      - 'composer.json'
+      - 'shipping-cost-monitor-pro-for-woocommerce.php'
+      - 'uninstall.php'
+      - 'changelog.txt'
+      - 'LICENSE'
+
+permissions:
+  contents: read
+
+env:
+  FREE_REPO: Vertex-Systems-Network/shipping-cost-monitor-for-woocommerce
+  PRO_REPO: Vertex-Systems-Network/shipping-cost-monitor-pro-for-woocommerce
+
+jobs:
+  build:
+    name: Contract check, PHP ${{ matrix.php }} lint and packaging
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.1', '8.2', '8.3', '8.4']
+    steps:
+      - name: Pick the other repository's branch
+        id: refs
+        shell: bash
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REPOSITORY" = "$FREE_REPO" ]; then other="$PRO_REPO"; else other="$FREE_REPO"; fi
+          if git ls-remote --exit-code --heads "https://github.com/${other}.git" "$BRANCH" >/dev/null 2>&1; then ref="$BRANCH"; else ref=main; fi
+          echo "other=$other" >> "$GITHUB_OUTPUT"
+          echo "other_ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "Building with ${other}@${ref}"
+
+      - name: Check out this repository
+        uses: actions/checkout@v7.0.0
+        with:
+          path: pro
+          persist-credentials: false
+
+      - name: Check out the other repository
+        uses: actions/checkout@v7.0.0
+        with:
+          repository: ${{ steps.refs.outputs.other }}
+          ref: ${{ steps.refs.outputs.other_ref }}
+          path: free
+          persist-credentials: false
+
+      - name: Set up PHP and Composer
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          tools: composer:v2
+          coverage: none
+
+      - name: Free/Pro contract (hooks, constants, script handle, JS globals, Requires Plugins)
+        run: bash pro/.github/scripts/check-contract.sh free pro
+
+      - name: Install Composer autoloaders
+        run: |
+          composer install --working-dir=free --no-dev --prefer-dist --no-interaction --no-progress --classmap-authoritative
+          composer install --working-dir=pro --no-dev --prefer-dist --no-interaction --no-progress --classmap-authoritative
+
+      - name: Lint PHP
+        shell: bash
+        run: |
+          set -euo pipefail
+          find free/shipping-cost-monitor-for-woocommerce.php free/includes free/vendor pro/shipping-cost-monitor-pro-for-woocommerce.php pro/includes pro/vendor -type f -name '*.php' -print0 | xargs -0 -r -n 1 php -l
+
+      - name: Verify Composer PSR-4 autoload
+        run: |
+          php -r 'define("ABSPATH", __DIR__ . "/"); require "free/vendor/autoload.php"; require "pro/vendor/autoload.php"; foreach (array("WPEssential\\ShippingCostMonitor\\Plugin", "WPEssential\\ShippingCostMonitorPro\\Plugin", "WPEssential\\ShippingCostMonitorPro\\Admin\\InvoiceImporter") as $c) { if (!class_exists($c)) { fwrite(STDERR, "PSR-4 autoload smoke failed: $c\n"); exit(1); } } echo "PSR-4 autoload smoke passed\n";' | tee /tmp/smoke.txt
+          grep -q "PSR-4 autoload smoke passed" /tmp/smoke.txt
+
+      - name: Check versions match
+        shell: bash
+        run: |
+          set -euo pipefail
+          free_version="$(sed -n 's/^ \* Version: *//p' free/shipping-cost-monitor-for-woocommerce.php)"
+          stable_tag="$(sed -n 's/^Stable tag: *//p' free/readme.txt)"
+          free_constant="$(sed -n "s/^define( 'WPE_SCM_VERSION', '\(.*\)' );/\1/p" free/shipping-cost-monitor-for-woocommerce.php)"
+          pro_version="$(sed -n 's/^ \* Version: *//p' pro/shipping-cost-monitor-pro-for-woocommerce.php)"
+          pro_constant="$(sed -n "s/^define( 'WPE_SCM_PRO_VERSION', '\(.*\)' );/\1/p" pro/shipping-cost-monitor-pro-for-woocommerce.php)"
+          echo "Free $free_version (constant $free_constant, readme $stable_tag); Pro $pro_version (constant $pro_constant)"
+          if [ -z "$free_version" ] || [ "$free_version" != "$stable_tag" ] || [ "$free_version" != "$free_constant" ]; then
+            echo "Free plugin Version, WPE_SCM_VERSION and readme Stable tag must match" >&2; exit 1
+          fi
+          if [ -z "$pro_version" ] || [ "$pro_version" != "$pro_constant" ]; then
+            echo "Pro plugin Version and WPE_SCM_PRO_VERSION must match" >&2; exit 1
+          fi
+
+      - name: Check Free contains no Pro code
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -e free/pro ]; then echo "The free repository must not contain a pro/ folder" >&2; exit 1; fi
+          if grep -rlE --exclude-dir=docs 'ShippingCostMonitorPro|wpe_scm_shipstation|wpe_scm_commit_invoice_rows|api\.shipstation\.com' free/shipping-cost-monitor-for-woocommerce.php free/includes free/assets; then
+            echo "Pro code found in the Free plugin files above" >&2; exit 1
+          fi
+
+      - name: Package both plugins
+        if: matrix.php == '8.3'
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          pack() { # slug source-dir out-dir files...
+            local slug="$1" src="$2" out="$3"; shift 3
+            local dir="$out/$slug"
+            rm -rf "$out"; mkdir -p "$dir"
+            for f in "$@"; do [ -e "$src/$f" ] && cp -R "$src/$f" "$dir/"; done
+            git -C "$src" rev-parse HEAD > "$dir/BUILD-ID.txt"
+            (cd "$dir" && find . -type f ! -name SHA256SUMS | LC_ALL=C sort | xargs sha256sum > SHA256SUMS)
+            (cd "$out" && zip -qr "../$slug.zip" "$slug") && unzip -tq "$slug.zip"
+          }
+          pack shipping-cost-monitor-for-woocommerce free build-free assets includes vendor languages shipping-cost-monitor-for-woocommerce.php uninstall.php readme.txt changelog.txt LICENSE composer.json
+          pack shipping-cost-monitor-pro-for-woocommerce pro build-pro assets includes vendor shipping-cost-monitor-pro-for-woocommerce.php uninstall.php changelog.txt LICENSE composer.json
+          free_sha="$(git -C free rev-parse --short=12 HEAD)"; pro_sha="$(git -C pro rev-parse --short=12 HEAD)"
+          echo "free_name=shipping-cost-monitor-for-woocommerce-${free_sha}" >> "$GITHUB_OUTPUT"
+          echo "pro_name=shipping-cost-monitor-pro-for-woocommerce-${pro_sha}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Installable ZIPs"
+            echo "Built together: Free \`${free_sha}\` and Pro \`${pro_sha}\`. Upload each downloaded artifact directly in WordPress (Plugins → Add New → Upload Plugin); each already contains its plugin folder. Install Free first: Pro requires it."
+            echo ""
+            for d in build-free/shipping-cost-monitor-for-woocommerce build-pro/shipping-cost-monitor-pro-for-woocommerce; do
+              echo "- \`$(basename "$d")/SHA256SUMS\` lists every packaged file (check with \`sha256sum -c SHA256SUMS\` inside the folder). Manifest SHA-256: \`$(sha256sum "$d/SHA256SUMS" | cut -d' ' -f1)\`"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Free ZIP
+        if: matrix.php == '8.3'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          # GitHub wraps every artifact in a ZIP. Uploading the folder that holds the plugin
+          # folder makes that ZIP the installable plugin ZIP.
+          name: ${{ steps.package.outputs.free_name }}
+          path: build-free/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Pro ZIP
+        if: matrix.php == '8.3'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ${{ steps.package.outputs.pro_name }}
+          path: build-pro/
+          if-no-files-found: error
+          retention-days: 14
