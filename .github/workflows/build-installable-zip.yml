@@ -3,10 +3,11 @@ name: Build installable plugin ZIPs (Free + Pro)
 # Free and Pro live in separate repositories:
 #   Free: Vertex-Systems-Network/shipping-cost-monitor-for-woocommerce
 #   Pro:  Vertex-Systems-Network/shipping-cost-monitor-pro-for-woocommerce
-# This workflow is identical in both. It checks out this repository and the other one
-# (same branch name if it exists there, otherwise main), checks the Free/Pro contract,
-# and always builds BOTH installable ZIPs, so a change in either plugin is tested
-# against the other.
+# This workflow is the same in both (only the push `paths:` list differs). It checks out
+# both repositories, Free into free/ and Pro into pro/, using the other repository's
+# same-named branch if it exists and main otherwise. It checks the Free/Pro contract,
+# lints both on every supported PHP version and, only when all of that passes, builds
+# and uploads BOTH installable ZIPs.
 
 on:
   workflow_dispatch:
@@ -32,8 +33,8 @@ env:
   PRO_REPO: Vertex-Systems-Network/shipping-cost-monitor-pro-for-woocommerce
 
 jobs:
-  build:
-    name: Contract check, PHP ${{ matrix.php }} lint and packaging
+  check:
+    name: Contract check and PHP ${{ matrix.php }} lint
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -41,23 +42,30 @@ jobs:
       matrix:
         php: ['8.1', '8.2', '8.3', '8.4']
     steps:
-      - name: Pick the other repository's branch
+      - name: Resolve repositories and branches
         id: refs
         shell: bash
         env:
           BRANCH: ${{ github.head_ref || github.ref_name }}
         run: |
           set -euo pipefail
-          if [ "$GITHUB_REPOSITORY" = "$FREE_REPO" ]; then other="$PRO_REPO"; else other="$FREE_REPO"; fi
-          if git ls-remote --exit-code --heads "https://github.com/${other}.git" "$BRANCH" >/dev/null 2>&1; then ref="$BRANCH"; else ref=main; fi
-          echo "other=$other" >> "$GITHUB_OUTPUT"
-          echo "other_ref=$ref" >> "$GITHUB_OUTPUT"
-          echo "Building with ${other}@${ref}"
+          # Free always lands in free/ and Pro in pro/, whichever repository started the run.
+          if [ "$GITHUB_REPOSITORY" = "$FREE_REPO" ]; then
+            other="$PRO_REPO"; self_path=free; other_path=pro
+          else
+            other="$FREE_REPO"; self_path=pro; other_path=free
+          fi
+          # Use the other repository's branch only if exactly refs/heads/$BRANCH exists there.
+          if git ls-remote "https://github.com/${other}.git" "refs/heads/${BRANCH}" | grep -q "refs/heads/${BRANCH}$"; then ref="$BRANCH"; else ref=main; fi
+          {
+            echo "other=$other"; echo "other_ref=$ref"; echo "self_path=$self_path"; echo "other_path=$other_path"
+          } >> "$GITHUB_OUTPUT"
+          echo "This repository -> ${self_path}/; ${other}@${ref} -> ${other_path}/"
 
       - name: Check out this repository
         uses: actions/checkout@v7.0.0
         with:
-          path: pro
+          path: ${{ steps.refs.outputs.self_path }}
           persist-credentials: false
 
       - name: Check out the other repository
@@ -65,7 +73,7 @@ jobs:
         with:
           repository: ${{ steps.refs.outputs.other }}
           ref: ${{ steps.refs.outputs.other_ref }}
-          path: free
+          path: ${{ steps.refs.outputs.other_path }}
           persist-credentials: false
 
       - name: Set up PHP and Composer
@@ -75,13 +83,13 @@ jobs:
           tools: composer:v2
           coverage: none
 
-      - name: Free/Pro contract (hooks, constants, script handle, JS globals, Requires Plugins)
-        run: bash pro/.github/scripts/check-contract.sh free pro
-
       - name: Install Composer autoloaders
         run: |
           composer install --working-dir=free --no-dev --prefer-dist --no-interaction --no-progress --classmap-authoritative
           composer install --working-dir=pro --no-dev --prefer-dist --no-interaction --no-progress --classmap-authoritative
+
+      - name: Free/Pro contract (hooks, constants, script handle, JS globals, Requires Plugins)
+        run: bash "${{ steps.refs.outputs.self_path }}/.github/scripts/check-contract.sh" free pro
 
       - name: Lint PHP
         shell: bash
@@ -93,6 +101,58 @@ jobs:
         run: |
           php -r 'define("ABSPATH", __DIR__ . "/"); require "free/vendor/autoload.php"; require "pro/vendor/autoload.php"; foreach (array("WPEssential\\ShippingCostMonitor\\Plugin", "WPEssential\\ShippingCostMonitorPro\\Plugin", "WPEssential\\ShippingCostMonitorPro\\Admin\\InvoiceImporter") as $c) { if (!class_exists($c)) { fwrite(STDERR, "PSR-4 autoload smoke failed: $c\n"); exit(1); } } echo "PSR-4 autoload smoke passed\n";' | tee /tmp/smoke.txt
           grep -q "PSR-4 autoload smoke passed" /tmp/smoke.txt
+
+  build:
+    name: Build and upload Free and Pro ZIPs
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Resolve repositories and branches
+        id: refs
+        shell: bash
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Free always lands in free/ and Pro in pro/, whichever repository started the run.
+          if [ "$GITHUB_REPOSITORY" = "$FREE_REPO" ]; then
+            other="$PRO_REPO"; self_path=free; other_path=pro
+          else
+            other="$FREE_REPO"; self_path=pro; other_path=free
+          fi
+          # Use the other repository's branch only if exactly refs/heads/$BRANCH exists there.
+          if git ls-remote "https://github.com/${other}.git" "refs/heads/${BRANCH}" | grep -q "refs/heads/${BRANCH}$"; then ref="$BRANCH"; else ref=main; fi
+          {
+            echo "other=$other"; echo "other_ref=$ref"; echo "self_path=$self_path"; echo "other_path=$other_path"
+          } >> "$GITHUB_OUTPUT"
+          echo "This repository -> ${self_path}/; ${other}@${ref} -> ${other_path}/"
+
+      - name: Check out this repository
+        uses: actions/checkout@v7.0.0
+        with:
+          path: ${{ steps.refs.outputs.self_path }}
+          persist-credentials: false
+
+      - name: Check out the other repository
+        uses: actions/checkout@v7.0.0
+        with:
+          repository: ${{ steps.refs.outputs.other }}
+          ref: ${{ steps.refs.outputs.other_ref }}
+          path: ${{ steps.refs.outputs.other_path }}
+          persist-credentials: false
+
+      - name: Set up PHP and Composer
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          tools: composer:v2
+          coverage: none
+
+      - name: Install Composer autoloaders
+        run: |
+          composer install --working-dir=free --no-dev --prefer-dist --no-interaction --no-progress --classmap-authoritative
+          composer install --working-dir=pro --no-dev --prefer-dist --no-interaction --no-progress --classmap-authoritative
 
       - name: Check versions match
         shell: bash
@@ -121,21 +181,25 @@ jobs:
           fi
 
       - name: Package both plugins
-        if: matrix.php == '8.3'
         id: package
         shell: bash
         run: |
           set -euo pipefail
-          pack() { # slug source-dir out-dir files...
+          # pack SLUG SRC OUT REQUIRED... -- OPTIONAL...
+          pack() {
             local slug="$1" src="$2" out="$3"; shift 3
-            local dir="$out/$slug"
+            local dir="$out/$slug" optional=0 f
             rm -rf "$out"; mkdir -p "$dir"
-            for f in "$@"; do [ -e "$src/$f" ] && cp -R "$src/$f" "$dir/"; done
+            for f in "$@"; do
+              if [ "$f" = "--" ]; then optional=1; continue; fi
+              if [ -e "$src/$f" ]; then cp -R "$src/$f" "$dir/"
+              elif [ "$optional" = 0 ]; then echo "::error::Required file $src/$f is missing"; return 1; fi
+            done
             git -C "$src" rev-parse HEAD > "$dir/BUILD-ID.txt"
             (cd "$dir" && find . -type f ! -name SHA256SUMS | LC_ALL=C sort | xargs sha256sum > SHA256SUMS)
             (cd "$out" && zip -qr "../$slug.zip" "$slug") && unzip -tq "$slug.zip"
           }
-          pack shipping-cost-monitor-for-woocommerce free build-free assets includes vendor languages shipping-cost-monitor-for-woocommerce.php uninstall.php readme.txt changelog.txt LICENSE composer.json
+          pack shipping-cost-monitor-for-woocommerce free build-free assets includes vendor shipping-cost-monitor-for-woocommerce.php uninstall.php readme.txt changelog.txt LICENSE composer.json -- languages
           pack shipping-cost-monitor-pro-for-woocommerce pro build-pro assets includes vendor shipping-cost-monitor-pro-for-woocommerce.php uninstall.php changelog.txt LICENSE composer.json
           free_sha="$(git -C free rev-parse --short=12 HEAD)"; pro_sha="$(git -C pro rev-parse --short=12 HEAD)"
           echo "free_name=shipping-cost-monitor-for-woocommerce-${free_sha}" >> "$GITHUB_OUTPUT"
@@ -150,7 +214,6 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload Free ZIP
-        if: matrix.php == '8.3'
         uses: actions/upload-artifact@v7.0.1
         with:
           # GitHub wraps every artifact in a ZIP. Uploading the folder that holds the plugin
@@ -161,7 +224,6 @@ jobs:
           retention-days: 14
 
       - name: Upload Pro ZIP
-        if: matrix.php == '8.3'
         uses: actions/upload-artifact@v7.0.1
         with:
           name: ${{ steps.package.outputs.pro_name }}
