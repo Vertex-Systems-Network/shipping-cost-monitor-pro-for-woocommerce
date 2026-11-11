@@ -16,4 +16,4 @@ This repository is the **Pro add-on**. Product, architecture, QA gates and the d
 - If a Free change alters or removes anything in the contract, update Pro in a same-named branch in this repository.
 - If a change touches documented behaviour, update the free plugin's built-in documentation (`assets/docs/`) and the wiki in the same PR pair.
 - Keep `.github/workflows/build-installable-zip.yml` and `.github/scripts/check-contract.sh` identical in both repositories, apart from the `paths:` trigger list.
-- CI always builds and uploads **both** ZIPs. Never deliver ZIPs in chat.
+- CI builds both plugins. The Pro ZIP is uploaded only from this repository, which must stay private (F-12); the public free repository never uploads it. Never deliver ZIPs in chat.
