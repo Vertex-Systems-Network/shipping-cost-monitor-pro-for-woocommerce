@@ -48,7 +48,7 @@ jobs:
         shell: bash
         env:
           BRANCH: ${{ github.head_ref || github.ref_name }}
-          SELF_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          SELF_SHA: ${{ github.sha }}  # on pull requests, the merge commit with the target branch
         run: |
           set -euo pipefail
           # Resolved once here; every later job checks out exactly these commits, so the
