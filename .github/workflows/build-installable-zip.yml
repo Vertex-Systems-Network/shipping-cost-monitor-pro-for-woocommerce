@@ -216,7 +216,10 @@ jobs:
             echo "### Installable ZIPs"
             echo "Built together: Free \`${free_sha}\` and Pro \`${pro_sha}\`. Upload each downloaded artifact directly in WordPress (Plugins → Add New → Upload Plugin); each already contains its plugin folder. Install Free first: Pro requires it. The Pro ZIP is uploaded only by runs in the Pro repository."
             echo ""
-            for d in build-free/shipping-cost-monitor-for-woocommerce build-pro/shipping-cost-monitor-pro-for-woocommerce; do
+            dirs="build-free/shipping-cost-monitor-for-woocommerce"
+            # The Pro ZIP is uploaded only from the Pro repository (F-12), so only list its hash there.
+            if [ "$GITHUB_REPOSITORY" = "$PRO_REPO" ]; then dirs="$dirs build-pro/shipping-cost-monitor-pro-for-woocommerce"; fi
+            for d in $dirs; do
               echo "- \`$(basename "$d")/SHA256SUMS\` lists every packaged file (check with \`sha256sum -c SHA256SUMS\` inside the folder). Manifest SHA-256: \`$(sha256sum "$d/SHA256SUMS" | cut -d' ' -f1)\`"
             done
           } >> "$GITHUB_STEP_SUMMARY"
