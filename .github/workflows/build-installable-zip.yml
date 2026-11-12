@@ -58,6 +58,7 @@ jobs:
         shell: bash
         env:
           BRANCH: ${{ inputs.other_ref || github.head_ref || github.ref_name }}
+          EXPLICIT_REF: ${{ inputs.other_ref }}
           CROSS_TOKEN: ${{ secrets.SCM_CROSS_REPO_TOKEN }}
           SELF_SHA: ${{ github.sha }}  # on pull requests, the merge commit with the target branch
         run: |
@@ -72,6 +73,9 @@ jobs:
           fi
           # The other repository's same-named branch if exactly refs/heads/$BRANCH exists, else main.
           line="$(git ls-remote "${base}/${other}.git" "refs/heads/${BRANCH}" | awk -v r="refs/heads/${BRANCH}" '$2==r')"
+          if [ -z "$line" ] && [ -n "${EXPLICIT_REF:-}" ]; then
+            echo "::error::Branch '${EXPLICIT_REF}' (other_ref) does not exist in ${other}. Check the name; nothing was tested."; exit 1
+          fi
           if [ -n "$line" ]; then other_ref="$BRANCH"; other_sha="${line%%[[:space:]]*}"; else other_ref=main; other_sha="$(git ls-remote "${base}/${other}.git" refs/heads/main | cut -f1)"; fi
           [ -n "$other_sha" ] || { echo "::error::Could not resolve ${other}@${other_ref}"; exit 1; }
           if [ "$self_path" = free ]; then free_sha="$SELF_SHA"; pro_sha="$other_sha"; else pro_sha="$SELF_SHA"; free_sha="$other_sha"; fi
