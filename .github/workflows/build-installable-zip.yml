@@ -232,7 +232,7 @@ jobs:
           name: ${{ steps.package.outputs.free_name }}
           path: build-free/
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 90
 
       - name: Upload Pro ZIP
         # The paid add-on is uploaded only from the (private) Pro repository, never from
@@ -243,4 +243,4 @@ jobs:
           name: ${{ steps.package.outputs.pro_name }}
           path: build-pro/
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 90
