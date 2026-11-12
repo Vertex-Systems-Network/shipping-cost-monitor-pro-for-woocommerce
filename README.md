@@ -27,7 +27,7 @@ Pro uses only these parts of Free, and both repositories' CI checks they still m
 
 ## Building
 
-There is no local build. GitHub Actions (`.github/workflows/build-installable-zip.yml`, identical in both repositories) checks out this repository **and** the free one, runs the contract check, lints on PHP 8.1–8.4, and builds both plugins on every push and pull request and uploads both ZIPs from this repository (the public free repository uploads only Free, F-12). When a branch with the same name exists in the other repository, that branch is used; otherwise `main`. Upload each downloaded artifact directly in WordPress (Plugins → Add New → Upload Plugin).
+There is no local build. The shared workflow (`.github/workflows/build-installable-zip.yml`, identical in both repositories) currently runs **only in the public free repository** (decision F-13): this private repository has no GitHub Actions budget. The free repository's CI reads this repository with a read-only token, runs the Free/Pro contract check and lints Pro on PHP 8.1–8.4, but uploads no Pro ZIP. To test a Pro branch, push a branch with the same name to the free repository, or run the free workflow manually with **other_ref** set to the Pro branch.
 
 ## Repository layout
 

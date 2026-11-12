@@ -12,6 +12,11 @@ name: Build installable plugin ZIPs (Free + Pro)
 
 on:
   workflow_dispatch:
+    inputs:
+      other_ref:
+        description: Branch of the other repository to build against (default - same-named branch, else main)
+        required: false
+        default: ''
   pull_request:
   push:
     branches:
@@ -36,6 +41,11 @@ env:
 jobs:
   resolve:
     name: Resolve the Free and Pro commits to build
+    # F-13: CI runs only in the public free repository (free GitHub-hosted minutes). The private
+    # Pro repository has no Actions budget, so its runs stop here and every later job is skipped.
+    # Pro changes are tested from the free repository: on a same-named branch, or by running this
+    # workflow there with other_ref set to the Pro branch. No Pro ZIP is built for download.
+    if: github.repository == 'Vertex-Systems-Network/shipping-cost-monitor-for-woocommerce'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -47,7 +57,7 @@ jobs:
         id: refs
         shell: bash
         env:
-          BRANCH: ${{ github.head_ref || github.ref_name }}
+          BRANCH: ${{ inputs.other_ref || github.head_ref || github.ref_name }}
           CROSS_TOKEN: ${{ secrets.SCM_CROSS_REPO_TOKEN }}
           SELF_SHA: ${{ github.sha }}  # on pull requests, the merge commit with the target branch
         run: |
